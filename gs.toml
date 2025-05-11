@@ -1,0 +1,8 @@
+[app]
+entrypoint = "app/main.py"
+
+[routes]
+path = "app/routes.py"
+
+[services]
+path = "app"  # Pointing to the app folder for services
