@@ -1,25 +1,26 @@
 import os
 import tempfile
 import git
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import faiss
 
 # Initialize the TinyLlama model (a smaller variant of Llama)
 model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModel.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name)
+
 
 # In-memory storage for documents and their embeddings
 DOC_STORE = []
 EMBEDDINGS = []
 index = None
+from sentence_transformers import SentenceTransformer
 
-# Function to embed text using TinyLlama model
+embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
 def embed_text(text):
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-    with torch.no_grad():
-        return model(**inputs).last_hidden_state[:, 0, :].squeeze().numpy()
+    return embed_model.encode(text)
 
 # Function to upsert text into the vector database (Faiss)
 def upsert_text(text):
@@ -61,7 +62,32 @@ def process_uploaded_files(file):
 def query_rag(query):
     if index is None or not DOC_STORE:
         return {"error": "No documents in database."}
+
+    # Step 1: Embed the query
     q_emb = embed_text(query)
-    D, I = index.search(q_emb.reshape(1, -1), 3)  # Search top 3 matches
-    results = [DOC_STORE[i] for i in I[0] if i < len(DOC_STORE)]
-    return {"query": query, "matches": results}
+    D, I = index.search(q_emb.reshape(1, -1), 1)  # Get top 1 relevant document
+
+    if not I[0].size or I[0][0] >= len(DOC_STORE):
+        return {"error": "No relevant documents found."}
+
+    # Step 2: Retrieve top document
+    context = DOC_STORE[I[0][0]]
+
+    # Step 3: Construct prompt for TinyLlama
+    prompt = f"Context:\n{context}\n\nQuestion: {query}\nAnswer:"
+
+    # Step 4: Tokenize and generate response
+    input_ids = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).input_ids
+    with torch.no_grad():
+        output_ids = model.generate(input_ids, max_new_tokens=100, do_sample=False)
+
+    response = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+    # Step 5: Extract generated answer from output
+    answer = response.split("Answer:")[-1].strip()
+
+    return {
+        "query": query,
+        "matched_doc": context,
+        "llm_answer": answer
+    }
